@@ -1,0 +1,17 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "joyce:presence-detector",
+  "visibility": "private",
+  "url": "",
+  "description": "Modular generic service: mmwave-rgbled",
+  "models": [
+      {
+          "api": "rdk:service:generic",
+          "model": "joyce:presence-detector:mmwave-rgbled",
+          "short_description": "Provide a short (100 characters or less) description of this model here",
+          "markdown_link": "README.md#model-joycecontrol-mmwave-ledmmwave-rgbled"
+      }
+  ],
+  "entrypoint": "./run.sh",
+  "first_run": ""
+}
