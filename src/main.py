@@ -12,15 +12,14 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import struct_to_dict, ValueTypes
 from viam.components.sensor import Sensor
 from viam.components.board import Board
-from viam.services.generic import Generic
-from viam.components.generic import Generic
+from viam.services.generic import Generic as GenericServiceBase
+from viam.components.generic import Generic as GenericComponent
 
 LOGGER = getLogger("mmwave-rgbled")
 
-class MmwaveRgbled(Generic, EasyResource):
+class MmwaveRgbled(GenericServiceBase, EasyResource):
     MODEL: ClassVar[Model] = Model(
-        ModelFamily("joyce", "presence-detector"), "mmwave-rgbled"
-    )
+        ModelFamily("joyce", "presence-detector"), "mmwave-rgbled")
 
     auto_start = True
     task = None
@@ -31,14 +30,7 @@ class MmwaveRgbled(Generic, EasyResource):
         cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> Self:
         """Factory method to create a new instance."""
-        instance = super().new(config, dependencies)
-
-        # Initialize attributes
-        instance.stop_event = asyncio.Event()
-        instance.task_readings = None
-        instance.task_led_status = None
-
-        return instance
+        return super().new(config, dependencies)
 
     @classmethod
     def validate_config(cls, config: ComponentConfig) -> Sequence[str]:
@@ -49,19 +41,14 @@ class MmwaveRgbled(Generic, EasyResource):
             if key not in fields or not isinstance(fields[key], str):
                 raise ValueError(f"{key} must be a string and included in the configuration.")
 
-        return []
+        return [str(name) for name in fields.values()]
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ):
         """Update resource configuration dynamically."""
         attrs = struct_to_dict(config.attributes)
-        
-        # Fetch board
-        board_resource = dependencies.get(
-            Board.get_resource_name(str(attrs.get("board")))
-        )
-        self.board = cast(Board, board_resource)
+        self.auto_start = bool(attrs.get("auto_start", self.auto_start))
 
         # Fetch sensor
         sensor_resource = dependencies.get(
@@ -71,85 +58,81 @@ class MmwaveRgbled(Generic, EasyResource):
 
         # Fetch RGB LED
         rgb_led_resource = dependencies.get(
-            Generic.get_resource_name(str(attrs.get("rgb_led")))
+            GenericComponent.get_resource_name(str(attrs.get("rgb_led")))
         )
-        self.rgb_led = cast(Generic, rgb_led_resource)
+        self.rgb_led = cast(GenericComponent, rgb_led_resource)
 
-        # Stop any existing tasks before starting new ones
-        self.stop_tasks()
-
-        # Start background tasks
-        self.task_readings = asyncio.create_task(self.get_readings())
-        self.task_led_status = asyncio.create_task(self.update_led_status())
+        # Start the LED loop after the ripple effect finishes
+        if self.auto_start:
+            self.start()
 
         return super().reconfigure(config, dependencies)
 
-    async def get_readings(self):
-        """Continuously fetch and log sensor readings."""
-        while not self.stop_event.is_set():
-            readings = await self.sensor.get_readings() if self.sensor else "unknown"
-            self.logger.info(f"Sensor Readings: {readings}")
-            LOGGER.info("Getting sensor readings.")
-
-            # Trigger a ripple effect
-            if self.rgb_led:
-                await self.rgb_led.do_command({"ripple": {"duration": 2.0}})
-
-            await asyncio.sleep(1)
-
-    async def update_led_status(self):
-        """Continuously update the RGB LED status based on sensor readings."""
+    async def on_loop(self):
+        """Continuously fetch sensor readings and update LED color."""
         color_mappings = {
-            "0": {"red": 0.0, "green": 0.0, "blue": 1.0},  # No target - Blue
-            "1": {"red": 1.0, "green": 0.0, "blue": 0.0},  # Moving target - Red
-            "2": {"red": 0.0, "green": 1.0, "blue": 0.0},  # Static target - Green
-            "3": {"red": 1.0, "green": 1.0, "blue": 0.0},  # Moving and static targets - Yellow
+            "No Target": {"red": 0.0, "green": 0.0, "blue": 1.0},  # Blue
+            "Moving Target": {"red": 1.0, "green": 0.0, "blue": 0.0},  # Red
+            "Static Target": {"red": 0.0, "green": 1.0, "blue": 0.0},  # Green
+            "Moving and Static Targets": {"red": 1.0, "green": 0.0, "blue": 1.0},  # Purple
         }
 
-        while not self.stop_event.is_set():
-            readings = await self.sensor.get_readings() if self.sensor else "unknown"
-            color = color_mappings.get(str(readings), {"red": 1.0, "green": 1.0, "blue": 1.0})  # Default: White
+        # Run the ripple effect once before starting LED updates
+        if self.rgb_led:
+            LOGGER.info("Triggering ripple effect on startup.")
+            await self.rgb_led.do_command({"ripple": {"duration": 2.0}})
 
-            if self.rgb_led:
-                await self.rgb_led.control_rgb_led(**color)
+        last_color = None
+        while not self.event.is_set():
+            try:
+                readings = await self.sensor.get_readings() if self.sensor else {}
+                # LOGGER.info(f"Sensor Readings: {readings}")
 
-            await asyncio.sleep(1)
+                # Parse detection status
+                detection_status = readings.get("detection_status", "No Target")
+                color = color_mappings.get(detection_status, {"red": 0.0, "green": 0.0, "blue": 1.0})  # Default: Blue
+                LOGGER.info(f"Detection Status: {detection_status}")
 
-    async def do_command(
-        self,
-        command: Mapping[str, ValueTypes],
-        *,
-        timeout: Optional[float] = None,
-        **kwargs
-    ) -> Mapping[str, ValueTypes]:
-        """Handle commands sent to the service."""
-        result = {key: False for key in command.keys()}
-        for name, _args in command.items():
-            if name == "start":
-                self.start_tasks()
-                result[name] = True
-            elif name == "stop":
-                self.stop_tasks()
-                result[name] = True
-        return result
+                # ✅ Resend LED command every 5 seconds to ensure persistence
+                if self.rgb_led and (color != last_color or (self.task and self.task.done())):
+                    # LOGGER.info(f"Ensuring LED stays on with {color}")
+                    await self.rgb_led.do_command({
+                        "control_rgb_led": {
+                            "red": color["red"],
+                            "green": color["green"],
+                            "blue": color["blue"],
+                        }
+                    })
+                    last_color = color
 
-    def start_tasks(self):
-        """Start background tasks if not already running."""
-        if not self.task_readings or self.task_readings.done():
-            self.task_readings = asyncio.create_task(self.get_readings())
-        if not self.task_led_status or self.task_led_status.done():
-            self.task_led_status = asyncio.create_task(self.update_led_status())
+            except Exception as e:
+                LOGGER.error(f"Error updating LED: {e}")
 
-    def stop_tasks(self):
-        """Stop background tasks gracefully."""
-        self.stop_event.set()
-        for task in [self.task_readings, self.task_led_status]:
-            if task and not task.done():
-                task.cancel()
+            await asyncio.sleep(1)  # Keep updating every second
+
+    def start(self):
+        """Start background loop only if not already running."""
+        if self.task is None or self.task.done():
+            self.event.clear()  # Ensures loop runs
+            self.task = asyncio.create_task(self.control_loop())
+
+    def stop(self):
+        """Stop the service loop gracefully."""
+        self.event.set()
+        if self.task is not None:
+            self.task.cancel()
+
+    async def control_loop(self):
+        """Persistent control loop handling LED updates."""
+        while not self.event.is_set():
+            await self.on_loop()
+            await asyncio.sleep(0)
+
+    def __del__(self):
+        self.stop()
 
     async def close(self):
-        """Cleanup tasks on shutdown."""
-        self.stop_tasks()
+        self.stop()
 
 if __name__ == "__main__":
     asyncio.run(Module.run_from_registry())

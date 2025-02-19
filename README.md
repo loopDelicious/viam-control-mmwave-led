@@ -1,18 +1,29 @@
-# Module control-mmwave-led 
+# Module control-mmwave-led
 
-Provide a description of the purpose of the module and any relevant information.
+Use an mmwave sensor to detect presence and display a visual indicator with an RGB LED.
 
 ## Model joyce:control-mmwave-led:mmwave-rgbled
 
-Provide a description of the model and any relevant information.
+The state detected by the mmwave sensor displays the following colors on an RGB LED:
+
+| Detection Status            | Color  |
+| --------------------------- | ------ |
+| `No Target`                 | Blue   |
+| `Moving Target`             | Red    |
+| `Static Target`             | Green  |
+| `Moving and Static Targets` | Purple |
+
+If you wish to customize your own logic, you can [create your own module](https://docs.viam.com/operate/get-started/other-hardware/hello-world-module/) using this repository as a starting point.
 
 ### Configuration
+
 The following attribute template can be used to configure this model:
 
 ```json
 {
-"attribute_1": <float>,
-"attribute_2": <string>
+  "board": <string>,
+  "sensor": <string>,
+  "rgb_led": <string>
 }
 ```
 
@@ -20,31 +31,18 @@ The following attribute template can be used to configure this model:
 
 The following attributes are available for this model:
 
-| Name          | Type   | Inclusion | Description                |
-|---------------|--------|-----------|----------------------------|
-| `attribute_1` | float  | Required  | Description of attribute 1 |
-| `attribute_2` | string | Optional  | Description of attribute 2 |
+| Name      | Type   | Inclusion | Description                                             |
+| --------- | ------ | --------- | ------------------------------------------------------- |
+| `board`   | string | Required  | The name of the Raspberry Pi board in the Viam app      |
+| `sensor`  | string | Required  | The name of the mmwave sensor component in the Viam app |
+| `rgb_led` | string | Required  | The name of the RGB LED component in the viam app       |
 
 #### Example Configuration
 
 ```json
 {
-  "attribute_1": 1.0,
-  "attribute_2": "foo"
-}
-```
-
-### DoCommand
-
-If your model implements DoCommand, provide an example payload of each command that is supported and the arguments that can be used. If your model does not implement DoCommand, remove this section.
-
-#### Example DoCommand
-
-```json
-{
-  "command_name": {
-    "arg1": "foo",
-    "arg2": 1
-  }
+  "board": "board-1",
+  "sensor": "mmwave-sensor",
+  "rgb_led": "generic-1"
 }
 ```
