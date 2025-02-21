@@ -19,83 +19,122 @@ LOGGER = getLogger("mmwave-rgbled")
 
 class MmwaveRgbled(GenericServiceBase, EasyResource):
     MODEL: ClassVar[Model] = Model(
-        ModelFamily("joyce", "presence-detector"), "mmwave-rgbled")
+        ModelFamily("joyce", "presence-detector"), "mmwave-rgbled"
+    )
 
     auto_start = True
     task = None
     event = Event()
 
+    DEFAULT_COLORS = {
+        "No Target": {"red": 0.0, "green": 0.0, "blue": 1.0},  # Blue
+        "Moving Target": {"red": 1.0, "green": 0.0, "blue": 0.0},  # Red
+        "Static Target": {"red": 0.0, "green": 1.0, "blue": 0.0},  # Green
+        "Moving and Static Targets": {"red": 1.0, "green": 0.0, "blue": 1.0},  # Purple
+    }
+
     @classmethod
     def new(
         cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> Self:
-        """Factory method to create a new instance."""
         return super().new(config, dependencies)
 
     @classmethod
     def validate_config(cls, config: ComponentConfig) -> Sequence[str]:
+        """Validate config and return only required dependencies."""
         fields = struct_to_dict(config.attributes)
         required_keys = ["board", "sensor", "rgb_led"]
+        dependencies = []
 
         for key in required_keys:
-            if key not in fields or not isinstance(fields[key], str):
+            if key in fields and isinstance(fields[key], str):
+                dependencies.append(fields[key])
+            else:
                 raise ValueError(f"{key} must be a string and included in the configuration.")
 
-        return [str(name) for name in fields.values()]
+        return dependencies  
 
-    def reconfigure(
-        self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
-    ):
-        """Update resource configuration dynamically."""
+    
+    def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
+        """Update resource configuration dynamically without treating color_attributes as a dependency."""
         attrs = struct_to_dict(config.attributes)
+        
         self.auto_start = bool(attrs.get("auto_start", self.auto_start))
 
-        # Fetch sensor
-        sensor_resource = dependencies.get(
-            Sensor.get_resource_name(str(attrs.get("sensor")))
-        )
-        self.sensor = cast(Sensor, sensor_resource)
+        # Fetch required dependencies
+        self.sensor = cast(Sensor, dependencies.get(Sensor.get_resource_name(attrs["sensor"])))
+        self.rgb_led = cast(GenericComponent, dependencies.get(GenericComponent.get_resource_name(attrs["rgb_led"])))
 
-        # Fetch RGB LED
-        rgb_led_resource = dependencies.get(
-            GenericComponent.get_resource_name(str(attrs.get("rgb_led")))
-        )
-        self.rgb_led = cast(GenericComponent, rgb_led_resource)
+        # Extract color attributes separately, without affecting attributes dict
+        color_config = attrs.pop("color_attributes", {}) 
+        self.color_attributes = self.load_color_config(color_config)
 
-        # Start the LED loop after the ripple effect finishes
         if self.auto_start:
             self.start()
 
         return super().reconfigure(config, dependencies)
 
-    async def on_loop(self):
-        """Continuously fetch sensor readings and update LED color."""
-        color_mappings = {
-            "No Target": {"red": 0.0, "green": 0.0, "blue": 1.0},  # Blue
-            "Moving Target": {"red": 1.0, "green": 0.0, "blue": 0.0},  # Red
-            "Static Target": {"red": 0.0, "green": 1.0, "blue": 0.0},  # Green
-            "Moving and Static Targets": {"red": 1.0, "green": 0.0, "blue": 1.0},  # Purple
+    
+    def load_color_config(self, color_attrs: dict) -> dict:
+        """Loads user-defined colors if available, otherwise defaults to preset values."""
+        color_keys = {
+            "no_target": "No Target",
+            "moving_target": "Moving Target",
+            "static_target": "Static Target",
+            "moving_and_static_targets": "Moving and Static Targets"
         }
+        custom_colors = {}
 
-        # Run the ripple effect once before starting LED updates
+        for key, readable_key in color_keys.items():
+            custom_color = color_attrs.get(key, {})  
+            default_color = self.DEFAULT_COLORS[readable_key]
+
+            if isinstance(custom_color, dict):
+                try:
+                    validated_color = {
+                        "red": min(max(float(custom_color.get("red", default_color["red"])), 0.0), 1.0),
+                        "green": min(max(float(custom_color.get("green", default_color["green"])), 0.0), 1.0),
+                        "blue": min(max(float(custom_color.get("blue", default_color["blue"])), 0.0), 1.0),
+                    }
+                    custom_colors[readable_key] = validated_color
+                except (ValueError, TypeError):
+                    LOGGER.warning(f"Invalid color values for {key}, using default.")
+                    custom_colors[readable_key] = default_color
+            else:
+                custom_colors[readable_key] = default_color
+
+        return custom_colors
+
+    async def on_loop(self):
+        """Continuously fetch sensor readings and update LED color without turning off."""
+
+        last_color = None
+        last_detection = "No Target"
+
+        # Run ripple effect before normal LED updates
         if self.rgb_led:
             LOGGER.info("Triggering ripple effect on startup.")
             await self.rgb_led.do_command({"ripple": {"duration": 2.0}})
+            await asyncio.sleep(2)  
 
-        last_color = None
+        await self.rgb_led.do_command({"control_rgb_led": {"red": 1.0, "green": 0.0, "blue": 0.0}})
+
         while not self.event.is_set():
             try:
                 readings = await self.sensor.get_readings() if self.sensor else {}
-                # LOGGER.info(f"Sensor Readings: {readings}")
-
-                # Parse detection status
                 detection_status = readings.get("detection_status", "No Target")
-                color = color_mappings.get(detection_status, {"red": 0.0, "green": 0.0, "blue": 1.0})  # Default: Blue
-                LOGGER.info(f"Detection Status: {detection_status}")
 
-                # ✅ Resend LED command every 5 seconds to ensure persistence
-                if self.rgb_led and (color != last_color or (self.task and self.task.done())):
-                    # LOGGER.info(f"Ensuring LED stays on with {color}")
+                # Ensure detection status exists
+                if detection_status not in self.color_attributes:
+                    LOGGER.warning(f"Unexpected detection status: {detection_status}. Using default color.")
+                    detection_status = "No Target"
+
+                color = self.color_attributes[detection_status]
+                LOGGER.info(f"Detection Status: {detection_status}, LED Color: {color}")
+
+                # Update LED only if the color actually changes
+                if self.rgb_led and color != last_color:
+                    LOGGER.info(f"Sending command to LED: {color}")
                     await self.rgb_led.do_command({
                         "control_rgb_led": {
                             "red": color["red"],
@@ -103,18 +142,19 @@ class MmwaveRgbled(GenericServiceBase, EasyResource):
                             "blue": color["blue"],
                         }
                     })
-                    last_color = color
+                    last_color = color  
+                else:
+                    LOGGER.info("Skipping LED update (color unchanged)")
 
             except Exception as e:
                 LOGGER.error(f"Error updating LED: {e}")
 
-            await asyncio.sleep(1)  # Keep updating every second
+            await asyncio.sleep(1) 
 
     def start(self):
-        """Start background loop only if not already running."""
+        """Ensure the control loop is running."""
         if self.task is None or self.task.done():
             self.event.clear()  # Ensures loop runs
-            self.task = asyncio.create_task(self.control_loop())
 
     def stop(self):
         """Stop the service loop gracefully."""
