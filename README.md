@@ -1,6 +1,6 @@
 # Module control-mmwave-led
 
-Use an mmwave sensor to detect presence and display a visual indicator with an RGB LED.
+The [`presence-detector`](https://app.viam.com/module/joyce/presence-detector) module uses an LD2410C mmwave sensor to detect presence and display a visual indicator with an RGB LED.
 
 ## Model joyce:control-mmwave-led:mmwave-rgbled
 
